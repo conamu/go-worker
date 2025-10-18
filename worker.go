@@ -8,16 +8,17 @@ import (
 )
 
 type Worker struct {
-	Name          string
-	Wg            *sync.WaitGroup
-	Ctx           context.Context
-	localCtx      context.Context
-	Cancel        context.CancelFunc
-	Logger        *slog.Logger
-	TaskFunc      func(*Worker)
-	Interval      time.Duration
-	running       bool
-	CommsChannels map[string]chan interface{}
+	Name       string
+	Wg         *sync.WaitGroup
+	Ctx        context.Context
+	localCtx   context.Context
+	Cancel     context.CancelFunc
+	Logger     *slog.Logger
+	TaskFunc   func(*Worker, any)
+	Interval   time.Duration
+	running    bool
+	InputChan  chan any
+	OutputChan chan any
 }
 
 // NewWorker creates a new background Worker.
@@ -25,18 +26,19 @@ type Worker struct {
 // The context is used as a global shutdown signal.
 // The jobTask function is the task that will be run.
 // Task functions will only send and receive data with channels.
-func NewWorker(ctx context.Context, name string, wg *sync.WaitGroup, jobTask func(*Worker), logger *slog.Logger, interval time.Duration) *Worker {
-	lCtx, cancelFunc := context.WithCancel(context.Background())
+func NewWorker(ctx context.Context, name string, wg *sync.WaitGroup, jobTask func(w *Worker, msg any), logger *slog.Logger, interval time.Duration) *Worker {
+	lCtx, cancelFunc := context.WithCancel(ctx)
 
 	job := &Worker{
-		Name:          name,
-		Wg:            wg,
-		Ctx:           ctx,
-		localCtx:      lCtx,
-		Cancel:        cancelFunc,
-		TaskFunc:      jobTask,
-		Interval:      interval,
-		CommsChannels: make(map[string]chan interface{}),
+		Name:       name,
+		Wg:         wg,
+		Ctx:        ctx,
+		localCtx:   lCtx,
+		Cancel:     cancelFunc,
+		TaskFunc:   jobTask,
+		Interval:   interval,
+		InputChan:  make(chan any),
+		OutputChan: make(chan any),
 	}
 
 	loggerCopy := *logger
@@ -48,6 +50,7 @@ func NewWorker(ctx context.Context, name string, wg *sync.WaitGroup, jobTask fun
 
 // Start launches a given task as a goroutine, calling a function until the context is done.
 // The wait group in the Worker can be used for the calling process to wait until execution is done.
+// If a worker is configured with 0 Duration it will only trigger on input channel
 func (w *Worker) Start() {
 	if w == nil {
 		return
@@ -60,6 +63,9 @@ func (w *Worker) Start() {
 	defer w.Wg.Done()
 
 	t := time.NewTimer(0)
+	if w.Interval == 0 {
+		t.Stop()
+	}
 
 	w.Logger.Info("started new worker")
 
@@ -69,13 +75,11 @@ func (w *Worker) Start() {
 			t.Stop()
 			w.Logger.Info("worker stopped")
 			return
-		case <-w.Ctx.Done():
-			t.Stop()
-			w.Logger.Info("worker stopped")
-			return
 		case <-t.C:
-			w.TaskFunc(w)
+			w.TaskFunc(w, nil)
 			t.Reset(w.Interval)
+		case msg := <-w.InputChan:
+			w.TaskFunc(w, msg)
 		}
 	}
 }
